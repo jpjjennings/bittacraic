@@ -37,7 +37,7 @@ Edit `settings.json` to change the challenge `prompts`, guest-facing `text`, and
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP listen port when using `start.sh` |
-| `ADMIN_PASSWORD` | unset | Required password for admin access |
+| `ADMIN_PASSWORD` | unset | Initial admin password, required when first creating the database; can then be changed at `/admin/password` |
 | `ADMIN_SESSION_SECRET` | `ADMIN_PASSWORD` | Secret used to sign admin session cookies |
 | `PUBLIC_URL` | inferred from request | Canonical guest URL used by the QR code |
 | `DATA_DIR` | `./data` | Directory containing the SQLite database |
@@ -52,4 +52,4 @@ Back up both the database and uploads directory. JPG, PNG, WEBP, GIF, and HEIC u
 
 ## Admin workflow
 
-The app starts with submissions open. From `/admin`, close submissions and choose the gallery countdown, manually open the gallery early, or reopen submissions. Approve and reject individual photos or all pending photos. Only approved photos are visible in the live guest gallery. The QR code points to the configured public guest URL.
+The app starts with submissions open. From `/admin`, close submissions and choose the gallery countdown, manually open the gallery early, or reopen submissions. Approve and reject individual photos or all pending photos. Admins can also permanently delete individual photos; deleting the last photo in a submission removes that now-empty submission. Change the admin password from the dashboard link or directly at `/admin/password`; the current password is required, and changing it signs out existing admin sessions. Only approved photos are visible in the live guest gallery. The QR code points to the configured public guest URL.

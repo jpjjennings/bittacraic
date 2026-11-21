@@ -35,6 +35,7 @@ MAX_UPLOAD_MB = max(1, int(os.getenv("MAX_UPLOAD_MB", "15")))
 MAX_PHOTOS_PER_SUBMISSION = max(1, int(os.getenv("MAX_PHOTOS_PER_SUBMISSION", "10")))
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 SESSION_KEY = os.getenv("ADMIN_SESSION_SECRET", ADMIN_PASSWORD).encode("utf-8")
+PASSWORD_HASH_ITERATIONS = 600_000
 PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")
 
 with SETTINGS_PATH.open(encoding="utf-8") as settings_file:
@@ -74,6 +75,30 @@ def database() -> Iterator[sqlite3.Connection]:
         connection.close()
 
 
+def hash_admin_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS
+    )
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password_hash(password: str, encoded_hash: str) -> bool:
+    try:
+        algorithm, iterations_text, salt_hex, digest_hex = encoded_hash.split("$", 3)
+        iterations = int(iterations_text)
+        if algorithm != "pbkdf2_sha256" or not 100_000 <= iterations <= 2_000_000:
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected_digest = bytes.fromhex(digest_hex)
+    except (ValueError, TypeError):
+        return False
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, iterations
+    )
+    return hmac.compare_digest(digest, expected_digest)
+
+
 def initialize_database() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -102,12 +127,24 @@ def initialize_database() -> None:
             );
             CREATE INDEX IF NOT EXISTS photos_submission_idx ON photos(submission_id);
             CREATE INDEX IF NOT EXISTS submissions_challenge_idx ON submissions(challenge);
+            CREATE TABLE IF NOT EXISTS admin_auth (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                password_hash TEXT NOT NULL,
+                session_version INTEGER NOT NULL DEFAULT 1
+            );
             """
         )
         db.execute(
             "INSERT OR IGNORE INTO settings (id, state, countdown_hours) VALUES (1, 'open', ?)",
             (DEFAULT_COUNTDOWN_HOURS,),
         )
+        if ADMIN_PASSWORD and not db.execute(
+            "SELECT 1 FROM admin_auth WHERE id = 1"
+        ).fetchone():
+            db.execute(
+                "INSERT OR IGNORE INTO admin_auth (id, password_hash) VALUES (1, ?)",
+                (hash_admin_password(ADMIN_PASSWORD),),
+            )
 
 
 @app.on_event("startup")
@@ -130,18 +167,49 @@ def session_signature(payload: str) -> str:
 
 
 def is_admin(request: Request) -> bool:
-    if not ADMIN_PASSWORD or not SESSION_KEY:
+    if not SESSION_KEY:
         return False
     token = request.cookies.get("bitta_admin", "")
     try:
         payload, signature = token.rsplit(".", 1)
-        timestamp = int(payload.split(":", 1)[0])
+        try:
+            version_text, timestamp_text, _ = payload.split(":", 2)
+            session_version = int(version_text)
+        except ValueError:
+            # Accept pre-versioned sessions until the admin changes the password.
+            timestamp_text, _ = payload.split(":", 1)
+            session_version = 1
+        timestamp = int(timestamp_text)
     except (ValueError, IndexError):
         return False
-    return (
-        abs(time.time() - timestamp) < 7 * 24 * 60 * 60
-        and hmac.compare_digest(signature, session_signature(payload))
-    )
+    if abs(time.time() - timestamp) >= 7 * 24 * 60 * 60:
+        return False
+    if not hmac.compare_digest(signature, session_signature(payload)):
+        return False
+    with database() as db:
+        auth = db.execute(
+            "SELECT session_version FROM admin_auth WHERE id = 1"
+        ).fetchone()
+    return bool(auth and session_version == auth["session_version"])
+
+
+def authenticate_admin(password: str) -> int | None:
+    if len(password.encode("utf-8")) > 1024:
+        return None
+    with database() as db:
+        auth = db.execute(
+            "SELECT password_hash, session_version FROM admin_auth WHERE id = 1"
+        ).fetchone()
+        if auth and verify_password_hash(password, auth["password_hash"]):
+            return auth["session_version"]
+    return None
+
+
+def has_admin_password() -> bool:
+    with database() as db:
+        return db.execute(
+            "SELECT 1 FROM admin_auth WHERE id = 1"
+        ).fetchone() is not None
 
 
 def require_admin(request: Request) -> RedirectResponse | None:
@@ -266,16 +334,23 @@ def public_photo(photo_id: int) -> Response:
 
 
 @app.get("/admin/login", response_class=HTMLResponse)
-def admin_login(request: Request, error: str = "") -> HTMLResponse:
+def admin_login(
+    request: Request, error: str = "", password_changed: bool = False
+) -> HTMLResponse:
     if is_admin(request):
         return RedirectResponse("/admin", status_code=303)
-    return page(request, "login.html", error=error, password_configured=bool(ADMIN_PASSWORD))
+    return page(
+        request, "login.html", error=error,
+        password_changed=password_changed,
+        password_configured=has_admin_password(),
+    )
 
 
 @app.post("/admin/login")
 def admin_login_submit(request: Request, password: str = Form(...)) -> Response:
-    if ADMIN_PASSWORD and hmac.compare_digest(password.encode("utf-8"), ADMIN_PASSWORD.encode("utf-8")):
-        payload = f"{int(time.time())}:{secrets.token_urlsafe(12)}"
+    session_version = authenticate_admin(password)
+    if session_version is not None:
+        payload = f"{session_version}:{int(time.time())}:{secrets.token_urlsafe(12)}"
         token = f"{payload}.{session_signature(payload)}"
         response = RedirectResponse("/admin", status_code=303)
         response.set_cookie(
@@ -284,7 +359,10 @@ def admin_login_submit(request: Request, password: str = Form(...)) -> Response:
             samesite="strict", max_age=7 * 24 * 60 * 60, path="/",
         )
         return response
-    return page(request, "login.html", error="That password didn't match.", password_configured=bool(ADMIN_PASSWORD))
+    return page(
+        request, "login.html", error="That password didn't match.",
+        password_configured=has_admin_password(),
+    )
 
 
 @app.post("/admin/logout")
@@ -326,6 +404,55 @@ def admin_dashboard(request: Request) -> Response:
     )
 
 
+@app.get("/admin/password", response_class=HTMLResponse)
+def admin_password_page(request: Request, error: str = "") -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    return page(request, "password.html", error=error)
+
+
+@app.post("/admin/password")
+def update_admin_password(
+    request: Request,
+    current_password: str = Form(...),
+    new_password: str = Form(...),
+    confirm_password: str = Form(...),
+) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    if len(new_password) < 12:
+        return page(
+            request, "password.html", error="The new password must be at least 12 characters."
+        )
+    if len(new_password.encode("utf-8")) > 1024:
+        return page(
+            request, "password.html", error="The new password is too long."
+        )
+    if not hmac.compare_digest(
+        new_password.encode("utf-8"), confirm_password.encode("utf-8")
+    ):
+        return page(request, "password.html", error="The new passwords do not match.")
+
+    with database() as db:
+        auth = db.execute(
+            "SELECT password_hash FROM admin_auth WHERE id = 1"
+        ).fetchone()
+        if not auth or not verify_password_hash(current_password, auth["password_hash"]):
+            return page(
+                request, "password.html", error="The current password is incorrect."
+            )
+        db.execute(
+            """UPDATE admin_auth
+               SET password_hash = ?, session_version = session_version + 1
+               WHERE id = 1""",
+            (hash_admin_password(new_password),),
+        )
+
+    response = RedirectResponse("/admin/login?password_changed=true", status_code=303)
+    response.delete_cookie("bitta_admin", path="/")
+    return response
+
+
 @app.post("/admin/state")
 def update_state(request: Request, action: str = Form(...), countdown_hours: int = Form(default=72)) -> Response:
     if redirect := require_admin(request):
@@ -340,6 +467,31 @@ def update_state(request: Request, action: str = Form(...), countdown_hours: int
         elif action == "open":
             db.execute("UPDATE settings SET state = 'open', go_live_at = NULL WHERE id = 1")
     return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/photo/{photo_id}/delete")
+def delete_photo(request: Request, photo_id: int) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+
+    filename = None
+    with database() as db:
+        photo = db.execute(
+            "SELECT submission_id, filename FROM photos WHERE id = ?", (photo_id,)
+        ).fetchone()
+        if photo:
+            filename = photo["filename"]
+            submission_id = photo["submission_id"]
+            db.execute("DELETE FROM photos WHERE id = ?", (photo_id,))
+            remaining = db.execute(
+                "SELECT 1 FROM photos WHERE submission_id = ? LIMIT 1", (submission_id,)
+            ).fetchone()
+            if not remaining:
+                db.execute("DELETE FROM submissions WHERE id = ?", (submission_id,))
+
+    if filename:
+        (UPLOAD_DIR / filename).unlink(missing_ok=True)
+    return RedirectResponse("/admin#moderation", status_code=303)
 
 
 @app.post("/admin/photo/{photo_id}/{decision}")
