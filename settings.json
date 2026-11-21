@@ -1,0 +1,39 @@
+{
+  "countdown_hours": 72,
+  "prompts": [
+    "Best candid moment of the happy couple",
+    "Funniest face in the crowd",
+    "Best dance floor action shot",
+    "Most romantic moment you spotted",
+    "Best group photo with your table",
+    "Best selfie with the bride or groom",
+    "Most creative shot of the venue",
+    "Caught in the act – best sneaky photo",
+    "Best outfit or accessory detail",
+    "The messiest moment of the night",
+    "Best toast or speech reaction",
+    "Hidden gem – something most people missed",
+    "Best kids-at-the-wedding shot",
+    "Most emotional moment captured",
+    "Best \"behind the scenes\" shot",
+    "The happy couple's best candid side"
+  ],
+  "text": {
+    "couple_names": "The happy couple",
+    "event_date": "A night to remember",
+    "tagline": "The best memories happen between the poses.",
+    "upload_heading": "Catch the craic.",
+    "upload_intro": "Snap a moment, take a challenge, and help us remember it all.",
+    "closed_heading": "The cameras are down.",
+    "closed_message": "Submissions are now closed. The gallery will be live soon — check back shortly! 🎉",
+    "live_heading": "The night, through your eyes.",
+    "thanks_message": "Thank you for your submission! Check back in a few days for the best shots 📸",
+    "name_label": "Your name",
+    "table_label": "Table number",
+    "challenge_label": "Your photo challenge",
+    "upload_label": "Add your photos",
+    "submit_label": "Send the memories",
+    "gallery_heading": "The craic, captured.",
+    "footer_message": "Made with love, laughter & a little bit of craic."
+  }
+}
