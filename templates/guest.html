@@ -3,32 +3,38 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f7f2e9">
-  <title>Bitta Craic | {{ text.couple_names }}</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500;1,600&display=swap" rel="stylesheet">
+  <meta name="theme-color" content="#f4f3ed">
+  <title>{{ text.couple_names }} | Wedding Album</title>
   <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body class="guest-page">
   <main class="page-shell">
     <header class="masthead">
-      <a class="brand" href="/" aria-label="Bitta Craic home"><span class="brand-mark">b.</span><span>bitta craic</span></a>
+      <a class="brand" href="/" aria-label="{{ text.couple_names }} wedding album"><span class="brand-mark">D<span>&</span>J</span><span class="brand-name">{{ text.couple_names }}<small>the wedding album</small></span></a>
       <span class="event-note">{{ text.event_date }}</span>
     </header>
 
     {% if state == 'open' %}
     <section class="hero upload-hero">
       <div class="hero-copy">
-        <p class="eyebrow"><span class="live-dot"></span> THE WEDDING ALBUM, TOGETHER</p>
+        <p class="eyebrow"><span class="live-dot"></span> A GATHERING OF LITTLE MOMENTS</p>
         <h1>{{ text.upload_heading }}</h1>
         <p class="hero-intro">{{ text.upload_intro }}</p>
         <p class="handwritten">{{ text.tagline }}</p>
       </div>
       <div class="hero-art" aria-hidden="true">
-        <div class="sun-disc"></div><span class="spark spark-one">✳</span><span class="spark spark-two">✦</span>
-        <div class="polaroid"><div class="polaroid-image"><span>✿</span></div><span class="polaroid-caption">one for the books</span></div>
-        <div class="art-stamp">GOOD<br>TIMES<br>ONLY</div>
+        <div class="art-halo"></div>
+        <svg class="botanical" viewBox="0 0 240 290" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M117 277C119 224 116 181 121 139C125 103 140 68 177 30" />
+          <path d="M121 184C95 175 77 157 68 132C94 136 111 150 121 184Z" />
+          <path d="M123 148C151 145 170 131 183 108C157 108 137 121 123 148Z" />
+          <path d="M127 108C105 94 95 74 96 50C117 62 128 81 127 108Z" />
+          <path d="M142 73C162 67 176 52 182 31C162 38 148 52 142 73Z" />
+          <path d="M117 277C115 251 107 229 91 211" />
+          <path d="M117 249C136 239 149 223 155 201C135 208 121 224 117 249Z" />
+        </svg>
+        <div class="art-seal"><span>D <i>&</i> J</span><small>THE DAY WE<br>SHARED</small></div>
+        <span class="art-caption">kept close, always</span>
       </div>
     </section>
 

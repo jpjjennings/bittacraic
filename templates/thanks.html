@@ -1,10 +1,9 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f7f2e9">
-  <title>Thank you | Bitta Craic</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,500;0,600;0,700;1,500&display=swap" rel="stylesheet"><link rel="stylesheet" href="/static/styles.css">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f4f3ed">
+  <title>Thank you | {{ text.couple_names }}</title><link rel="stylesheet" href="/static/styles.css">
 </head>
-<body class="guest-page"><main class="page-shell"><header class="masthead"><a class="brand" href="/"><span class="brand-mark">b.</span><span>bitta craic</span></a><span class="event-note">{{ text.event_date }}</span></header>
+<body class="guest-page"><main class="page-shell"><header class="masthead"><a class="brand" href="/"><span class="brand-mark">D<span>&</span>J</span><span class="brand-name">{{ text.couple_names }}<small>the wedding album</small></span></a><span class="event-note">{{ text.event_date }}</span></header>
   <section class="state-card thanks-card"><div class="thanks-mark">✳</div><p class="eyebrow">MOMENT CAUGHT</p><h1>That one's in the books.</h1><p class="state-copy">{{ text.thanks_message }}</p><a class="button button-outline" href="/">Back to the party</a></section>
   <footer class="site-footer"><span>{{ text.footer_message }}</span></footer></main></body></html>
