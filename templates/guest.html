@@ -10,7 +10,7 @@
 <body class="guest-page">
   <main class="page-shell">
     <header class="masthead">
-      <a class="brand" href="/" aria-label="{{ text.couple_names }} wedding album"><span class="brand-mark">D<span>&</span>J</span><span class="brand-name">{{ text.couple_names }}<small>the wedding album</small></span></a>
+      <a class="brand" href="/" aria-label="{{ text.couple_names }} wedding album"><img class="brand-logo" src="/static/logo.png" alt=""><span class="brand-name">{{ text.couple_names }}<small>the wedding album</small></span></a>
       <span class="event-note">{{ text.event_date }}</span>
     </header>
 
@@ -33,7 +33,7 @@
           <path d="M117 277C115 251 107 229 91 211" />
           <path d="M117 249C136 239 149 223 155 201C135 208 121 224 117 249Z" />
         </svg>
-        <div class="art-seal"><span>D <i>&</i> J</span><small>THE DAY WE<br>SHARED</small></div>
+        <div class="art-seal"><img class="art-seal-logo" src="/static/logo.png" alt=""><small>THE DAY WE<br>SHARED</small></div>
         <span class="art-caption">kept close, always</span>
       </div>
     </section>
@@ -49,13 +49,29 @@
         <div class="field challenge-field">
           <span>{{ text.challenge_label }}</span>
           <div class="challenge-picker">
-            <select id="challenge" name="challenge" required>
-              <option value="" disabled selected>Pick a prompt or spin the wheel</option>
-              {% for prompt in prompts %}<option value="{{ prompt }}">{{ prompt }}</option>{% endfor %}
-            </select>
-            <button class="spin-button" id="spin" type="button" aria-label="Spin for a random challenge"><span aria-hidden="true">⟳</span> Surprise me</button>
-          </div>
-          <p class="field-hint" id="spin-message">Sixteen little ways to see the night differently.</p>
+             <select id="challenge" name="challenge" required>
+               <option value="" disabled selected>{% if wheel_enabled %}Pick a prompt or spin the wheel{% else %}Choose the prompt from your table spinner{% endif %}</option>
+               {% for prompt in prompts %}<option value="{{ prompt }}">{{ prompt }}</option>{% endfor %}
+             </select>
+             {% if wheel_enabled %}
+             <button class="spin-button" id="spin" type="button" aria-label="Spin for a random challenge" aria-controls="challenge-wheel-stage" aria-expanded="false"><span aria-hidden="true">⟳</span> Surprise me</button>
+             {% endif %}
+           </div>
+           {% if wheel_enabled %}
+           <div class="wheel-stage" id="challenge-wheel-stage" hidden>
+             <div class="wheel-wrap">
+               <span class="wheel-pointer" aria-hidden="true"></span>
+               <svg class="challenge-wheel" id="challenge-wheel" viewBox="0 0 360 360" role="img" aria-labelledby="challenge-wheel-title">
+                 <title id="challenge-wheel-title">Challenge wheel</title>
+                 <g id="challenge-wheel-slices"></g>
+               </svg>
+             </div>
+             <p class="wheel-result" id="wheel-result" aria-live="polite">Give it a spin!</p>
+           </div>
+           <p class="field-hint" id="spin-message">A wheel of little ways to see the night differently.</p>
+           {% else %}
+           <p class="field-hint">Choose the challenge shown on the physical spinner at your table.</p>
+           {% endif %}
         </div>
         <div class="field">
           <span>{{ text.upload_label }}</span>
@@ -95,10 +111,10 @@
     </section>
     <nav class="category-nav" aria-label="Filter gallery by challenge">
       <button class="category-chip active" data-filter="all">All the moments</button>
-      {% for prompt in prompts %}{% if gallery_groups.get(prompt) %}<button class="category-chip" data-filter="category-{{ loop.index0 }}">{{ prompt }}</button>{% endif %}{% endfor %}
+      {% for prompt in gallery_prompts %}{% if gallery_groups.get(prompt) %}<button class="category-chip" data-filter="category-{{ loop.index0 }}">{{ prompt }}</button>{% endif %}{% endfor %}
     </nav>
     <div class="gallery-groups">
-      {% for prompt in prompts %}
+      {% for prompt in gallery_prompts %}
         {% set group_photos = gallery_groups.get(prompt, []) %}
         {% if group_photos %}
         <section class="gallery-category" data-category="category-{{ loop.index0 }}">

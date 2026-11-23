@@ -42,7 +42,7 @@ with SETTINGS_PATH.open(encoding="utf-8") as settings_file:
     SETTINGS = json.load(settings_file)
 register_heif_opener()
 
-PROMPTS = SETTINGS["prompts"]
+DEFAULT_PROMPTS = SETTINGS["prompts"]
 TEXT = SETTINGS["text"]
 DEFAULT_COUNTDOWN_HOURS = int(os.getenv("GALLERY_COUNTDOWN_HOURS", SETTINGS.get("countdown_hours", 72)))
 
@@ -109,7 +109,9 @@ def initialize_database() -> None:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 state TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'closed', 'live')),
                 go_live_at TEXT,
-                countdown_hours INTEGER NOT NULL DEFAULT 72
+                countdown_hours INTEGER NOT NULL DEFAULT 72,
+                wheel_enabled INTEGER NOT NULL DEFAULT 1,
+                prompts_json TEXT
             );
             CREATE TABLE IF NOT EXISTS submissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +136,15 @@ def initialize_database() -> None:
             );
             """
         )
+        settings_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(settings)")
+        }
+        if "wheel_enabled" not in settings_columns:
+            db.execute(
+                "ALTER TABLE settings ADD COLUMN wheel_enabled INTEGER NOT NULL DEFAULT 1"
+            )
+        if "prompts_json" not in settings_columns:
+            db.execute("ALTER TABLE settings ADD COLUMN prompts_json TEXT")
         db.execute(
             "INSERT OR IGNORE INTO settings (id, state, countdown_hours) VALUES (1, 'open', ?)",
             (DEFAULT_COUNTDOWN_HOURS,),
@@ -152,14 +163,32 @@ def startup() -> None:
     initialize_database()
 
 
-def get_app_state(db: sqlite3.Connection) -> tuple[str, datetime | None, int]:
-    row = db.execute("SELECT state, go_live_at, countdown_hours FROM settings WHERE id = 1").fetchone()
+def get_app_state(db: sqlite3.Connection) -> tuple[str, datetime | None, int, bool]:
+    row = db.execute(
+        "SELECT state, go_live_at, countdown_hours, wheel_enabled FROM settings WHERE id = 1"
+    ).fetchone()
     state = row["state"]
     go_live_at = datetime.fromisoformat(row["go_live_at"]) if row["go_live_at"] else None
     if state == "closed" and go_live_at and now_utc() >= go_live_at:
         db.execute("UPDATE settings SET state = 'live' WHERE id = 1")
         state = "live"
-    return state, go_live_at, row["countdown_hours"]
+    return state, go_live_at, row["countdown_hours"], bool(row["wheel_enabled"])
+
+
+def get_prompts(db: sqlite3.Connection) -> list[str]:
+    row = db.execute("SELECT prompts_json FROM settings WHERE id = 1").fetchone()
+    if row and row["prompts_json"]:
+        try:
+            saved_prompts = json.loads(row["prompts_json"])
+        except (TypeError, json.JSONDecodeError):
+            saved_prompts = None
+        if (
+            isinstance(saved_prompts, list)
+            and saved_prompts
+            and all(isinstance(prompt, str) and prompt.strip() for prompt in saved_prompts)
+        ):
+            return saved_prompts
+    return DEFAULT_PROMPTS
 
 
 def session_signature(payload: str) -> str:
@@ -219,11 +248,22 @@ def require_admin(request: Request) -> RedirectResponse | None:
 
 
 def page(request: Request, name: str, **context: object) -> HTMLResponse:
+    needs_prompts = name in {"guest.html", "admin.html"} and "prompts" not in context
+    needs_wheel_setting = name == "guest.html" and "wheel_enabled" not in context
+    if needs_prompts or needs_wheel_setting:
+        with database() as db:
+            if needs_prompts:
+                context["prompts"] = get_prompts(db)
+            if needs_wheel_setting:
+                setting = db.execute(
+                    "SELECT wheel_enabled FROM settings WHERE id = 1"
+                ).fetchone()
+                context["wheel_enabled"] = bool(setting["wheel_enabled"])
     return templates.TemplateResponse(
         request=request,
         name=name,
         context={
-            "request": request, "text": TEXT, "prompts": PROMPTS,
+            "request": request, "text": TEXT,
             "max_photos": MAX_PHOTOS_PER_SUBMISSION, "max_upload_mb": MAX_UPLOAD_MB,
             **context,
         },
@@ -233,19 +273,22 @@ def page(request: Request, name: str, **context: object) -> HTMLResponse:
 @app.get("/", response_class=HTMLResponse, name="home")
 def home(request: Request) -> HTMLResponse:
     with database() as db:
-        state, go_live_at, _ = get_app_state(db)
+        state, go_live_at, _, wheel_enabled = get_app_state(db)
+        prompts = get_prompts(db)
         photos = db.execute(
             """SELECT photos.id, submissions.challenge
                FROM photos JOIN submissions ON submissions.id = photos.submission_id
                WHERE photos.approval = 'approved' ORDER BY photos.id DESC"""
         ).fetchall() if state == "live" else []
-    gallery_groups = {prompt: [] for prompt in PROMPTS}
+    gallery_prompts = list(dict.fromkeys([*prompts, *(photo["challenge"] for photo in photos)]))
+    gallery_groups = {prompt: [] for prompt in gallery_prompts}
     for photo in photos:
         gallery_groups.setdefault(photo["challenge"], []).append(photo["id"])
     return page(
         request, "guest.html", state=state,
         go_live_at=iso_utc(go_live_at) if go_live_at else "", gallery_groups=gallery_groups,
-        has_gallery=any(gallery_groups.values()),
+        has_gallery=any(gallery_groups.values()), wheel_enabled=wheel_enabled,
+        prompts=prompts, gallery_prompts=gallery_prompts,
     )
 
 
@@ -259,10 +302,12 @@ async def submit(
 ) -> Response:
     if len(photos) > MAX_PHOTOS_PER_SUBMISSION:
         return page(request, "guest.html", state="open", go_live_at="", error=f"Please choose no more than {MAX_PHOTOS_PER_SUBMISSION} photos.")
-    if challenge not in PROMPTS:
+    with database() as db:
+        prompts = get_prompts(db)
+    if challenge not in prompts:
         return page(request, "guest.html", state="open", go_live_at="", error="Please choose a challenge from the list.")
     with database() as db:
-        state, _, _ = get_app_state(db)
+        state, _, _, _ = get_app_state(db)
         if state != "open":
             return RedirectResponse("/", status_code=303)
 
@@ -297,7 +342,7 @@ async def submit(
     stored: list[str] = []
     try:
         with database() as db:
-            state, _, _ = get_app_state(db)
+            state, _, _, _ = get_app_state(db)
             if state != "open":
                 return RedirectResponse("/", status_code=303)
             cursor = db.execute(
@@ -323,7 +368,7 @@ async def submit(
 @app.get("/photos/{photo_id}")
 def public_photo(photo_id: int) -> Response:
     with database() as db:
-        state, _, _ = get_app_state(db)
+        state, _, _, _ = get_app_state(db)
         photo = db.execute(
             "SELECT filename FROM photos WHERE id = ? AND approval = 'approved'", (photo_id,)
         ).fetchone()
@@ -373,11 +418,14 @@ def admin_logout() -> Response:
 
 
 @app.get("/admin", response_class=HTMLResponse)
-def admin_dashboard(request: Request) -> Response:
+def admin_dashboard(
+    request: Request, prompt_error: str = "", prompts_saved: bool = False
+) -> Response:
     if redirect := require_admin(request):
         return redirect
     with database() as db:
-        state, go_live_at, countdown_hours = get_app_state(db)
+        state, go_live_at, countdown_hours, wheel_enabled = get_app_state(db)
+        prompts = get_prompts(db)
         total_submissions = db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
         total_photos = db.execute("SELECT COUNT(*) FROM photos").fetchone()[0]
         pending_count = db.execute("SELECT COUNT(*) FROM photos WHERE approval = 'pending'").fetchone()[0]
@@ -385,6 +433,7 @@ def admin_dashboard(request: Request) -> Response:
             row["challenge"]: row["total"]
             for row in db.execute("SELECT challenge, COUNT(*) AS total FROM submissions GROUP BY challenge")
         }
+        category_prompts = list(dict.fromkeys([*prompts, *category_counts]))
         queue = db.execute(
             """SELECT photos.id, photos.filename, photos.original_name, photos.approval,
                       submissions.guest_name, submissions.table_number, submissions.challenge, submissions.created_at
@@ -396,11 +445,19 @@ def admin_dashboard(request: Request) -> Response:
     qr_buffer = io.BytesIO()
     qr.save(qr_buffer, format="PNG")
     qr_data = "data:image/png;base64," + base64.b64encode(qr_buffer.getvalue()).decode("ascii")
+    prompt_errors = {
+        "empty": "Add at least one prompt before saving.",
+        "too_many": "You can add up to 50 prompts.",
+        "too_long": "Each prompt must be 200 characters or fewer.",
+        "duplicate": "Prompts must be unique.",
+    }
     return page(
         request, "admin.html", state=state, go_live_at=iso_utc(go_live_at) if go_live_at else "",
         countdown_hours=countdown_hours, total_submissions=total_submissions, total_photos=total_photos,
-        pending_count=pending_count, category_counts=category_counts, queue=queue,
-        qr_data=qr_data, guest_url=guest_url,
+        pending_count=pending_count, category_counts=category_counts,
+        category_prompts=category_prompts, queue=queue, prompts=prompts,
+        qr_data=qr_data, guest_url=guest_url, wheel_enabled=wheel_enabled,
+        prompt_error=prompt_errors.get(prompt_error, ""), prompts_saved=prompts_saved,
     )
 
 
@@ -467,6 +524,45 @@ def update_state(request: Request, action: str = Form(...), countdown_hours: int
         elif action == "open":
             db.execute("UPDATE settings SET state = 'open', go_live_at = NULL WHERE id = 1")
     return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/wheel")
+def update_wheel(request: Request, enabled: bool = Form(default=False)) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    with database() as db:
+        db.execute(
+            "UPDATE settings SET wheel_enabled = ? WHERE id = 1",
+            (int(enabled),),
+        )
+    return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/prompts")
+def update_prompts(
+    request: Request, prompt_text: str = Form(..., alias="prompts")
+) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    prompts = [line.strip() for line in prompt_text.splitlines() if line.strip()]
+    error = ""
+    if not prompts:
+        error = "empty"
+    elif len(prompts) > 50:
+        error = "too_many"
+    elif any(len(prompt) > 200 for prompt in prompts):
+        error = "too_long"
+    elif len({prompt.casefold() for prompt in prompts}) != len(prompts):
+        error = "duplicate"
+    if error:
+        return RedirectResponse(f"/admin?prompt_error={error}", status_code=303)
+
+    with database() as db:
+        db.execute(
+            "UPDATE settings SET prompts_json = ? WHERE id = 1",
+            (json.dumps(prompts, ensure_ascii=False),),
+        )
+    return RedirectResponse("/admin?prompts_saved=true", status_code=303)
 
 
 @app.post("/admin/photo/{photo_id}/delete")
