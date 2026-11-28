@@ -113,12 +113,19 @@ def initialize_database() -> None:
                 wheel_enabled INTEGER NOT NULL DEFAULT 1,
                 prompts_json TEXT
             );
+            CREATE TABLE IF NOT EXISTS tables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                token TEXT NOT NULL UNIQUE,
+                photo_limit INTEGER NOT NULL CHECK (photo_limit >= 1)
+            );
             CREATE TABLE IF NOT EXISTS submissions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guest_name TEXT,
                 table_number TEXT,
                 challenge TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                table_id INTEGER REFERENCES tables(id) ON DELETE SET NULL
             );
             CREATE TABLE IF NOT EXISTS photos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -145,6 +152,16 @@ def initialize_database() -> None:
             )
         if "prompts_json" not in settings_columns:
             db.execute("ALTER TABLE settings ADD COLUMN prompts_json TEXT")
+        submission_columns = {
+            row["name"] for row in db.execute("PRAGMA table_info(submissions)")
+        }
+        if "table_id" not in submission_columns:
+            db.execute(
+                "ALTER TABLE submissions ADD COLUMN table_id INTEGER REFERENCES tables(id) ON DELETE SET NULL"
+            )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS submissions_table_idx ON submissions(table_id)"
+        )
         db.execute(
             "INSERT OR IGNORE INTO settings (id, state, countdown_hours) VALUES (1, 'open', ?)",
             (DEFAULT_COUNTDOWN_HOURS,),
@@ -274,6 +291,8 @@ def page(request: Request, name: str, **context: object) -> HTMLResponse:
 def home(request: Request) -> HTMLResponse:
     with database() as db:
         state, go_live_at, _, wheel_enabled = get_app_state(db)
+        if state == "open":
+            state = "table_required"
         prompts = get_prompts(db)
         photos = db.execute(
             """SELECT photos.id, submissions.challenge
@@ -292,24 +311,80 @@ def home(request: Request) -> HTMLResponse:
     )
 
 
-@app.post("/submit")
+def table_photo_count(db: sqlite3.Connection, table_id: int) -> int:
+    return db.execute(
+        """SELECT COUNT(*)
+           FROM photos JOIN submissions ON submissions.id = photos.submission_id
+           WHERE submissions.table_id = ?""",
+        (table_id,),
+    ).fetchone()[0]
+
+
+def render_table_upload(
+    request: Request, token: str, error: str = ""
+) -> Response:
+    with database() as db:
+        table = db.execute(
+            "SELECT id, name, token, photo_limit FROM tables WHERE token = ?", (token,)
+        ).fetchone()
+        if not table:
+            return Response(status_code=404)
+        state, _, _, wheel_enabled = get_app_state(db)
+        if state != "open":
+            return RedirectResponse("/", status_code=303)
+        remaining = max(0, table["photo_limit"] - table_photo_count(db, table["id"]))
+        prompts = get_prompts(db)
+    return page(
+        request,
+        "guest.html",
+        state="open" if remaining else "table_full",
+        error=error,
+        table_name=table["name"],
+        table_token=token,
+        table_remaining=remaining,
+        table_limit=table["photo_limit"],
+        max_photos=min(MAX_PHOTOS_PER_SUBMISSION, remaining),
+        wheel_enabled=wheel_enabled,
+        prompts=prompts,
+    )
+
+
+@app.get("/table/{token}", response_class=HTMLResponse)
+def table_guest_page(request: Request, token: str) -> Response:
+    return render_table_upload(request, token)
+
+
+@app.post("/table/{token}/submit")
 async def submit(
     request: Request,
+    token: str,
     guest_name: str = Form(default=""),
-    table_number: str = Form(default=""),
     challenge: str = Form(...),
     photos: list[UploadFile] = File(...),
 ) -> Response:
-    if len(photos) > MAX_PHOTOS_PER_SUBMISSION:
-        return page(request, "guest.html", state="open", go_live_at="", error=f"Please choose no more than {MAX_PHOTOS_PER_SUBMISSION} photos.")
     with database() as db:
-        prompts = get_prompts(db)
-    if challenge not in prompts:
-        return page(request, "guest.html", state="open", go_live_at="", error="Please choose a challenge from the list.")
-    with database() as db:
+        table = db.execute(
+            "SELECT id, photo_limit FROM tables WHERE token = ?", (token,)
+        ).fetchone()
+        if not table:
+            return Response(status_code=404)
         state, _, _, _ = get_app_state(db)
         if state != "open":
             return RedirectResponse("/", status_code=303)
+        remaining = max(0, table["photo_limit"] - table_photo_count(db, table["id"]))
+        prompts = get_prompts(db)
+    if not remaining:
+        return render_table_upload(request, token)
+    if len(photos) > min(MAX_PHOTOS_PER_SUBMISSION, remaining):
+        return render_table_upload(
+            request,
+            token,
+            error=f"Choose no more than {min(MAX_PHOTOS_PER_SUBMISSION, remaining)} photos for this submission.",
+        )
+    if challenge not in prompts:
+        return render_table_upload(
+            request, token, error="Please choose a challenge from the list."
+        )
 
     validated: list[tuple[bytes, str, str]] = []
     for upload in photos:
@@ -317,13 +392,17 @@ async def submit(
         if not content:
             continue
         if len(content) > MAX_UPLOAD_MB * 1024 * 1024:
-            return page(request, "guest.html", state="open", go_live_at="", error=f"Each photo must be smaller than {MAX_UPLOAD_MB} MB.")
+            return render_table_upload(
+                request, token, error=f"Each photo must be smaller than {MAX_UPLOAD_MB} MB."
+            )
         try:
             image = Image.open(io.BytesIO(content))
             image.verify()
             image_format = image.format
         except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
-            return page(request, "guest.html", state="open", go_live_at="", error="One of those files is not a supported image.")
+            return render_table_upload(
+                request, token, error="One of those files is not a supported image."
+            )
         if image_format == "HEIF":
             image = ImageOps.exif_transpose(Image.open(io.BytesIO(content))).convert("RGB")
             converted = io.BytesIO()
@@ -333,21 +412,42 @@ async def submit(
         extensions = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp", "GIF": ".gif"}
         extension = extensions.get(image_format or "")
         if not extension:
-            return page(request, "guest.html", state="open", go_live_at="", error="Please upload JPG, PNG, WEBP, or GIF photos.")
+            return render_table_upload(
+                request, token, error="Please upload JPG, PNG, WEBP, or GIF photos."
+            )
         original_name = Path(upload.filename or "photo").name[:200]
         validated.append((content, extension, original_name))
     if not validated:
-        return page(request, "guest.html", state="open", go_live_at="", error="Choose at least one photo to submit.")
+        return render_table_upload(
+            request, token, error="Choose at least one photo to submit."
+        )
 
     stored: list[str] = []
     try:
         with database() as db:
+            db.execute("BEGIN IMMEDIATE")
             state, _, _, _ = get_app_state(db)
             if state != "open":
                 return RedirectResponse("/", status_code=303)
+            table = db.execute(
+                "SELECT id, photo_limit FROM tables WHERE token = ?", (token,)
+            ).fetchone()
+            if not table:
+                return Response(status_code=404)
+            remaining = max(
+                0, table["photo_limit"] - table_photo_count(db, table["id"])
+            )
+            if len(validated) > remaining:
+                return render_table_upload(
+                    request,
+                    token,
+                    error="This table's photo limit was reached while you were uploading. Please choose fewer photos.",
+                )
             cursor = db.execute(
-                "INSERT INTO submissions (guest_name, table_number, challenge, created_at) VALUES (?, ?, ?, ?)",
-                (guest_name.strip()[:100] or None, table_number.strip()[:50] or None, challenge, iso_utc(now_utc())),
+                """INSERT INTO submissions
+                   (guest_name, challenge, created_at, table_id)
+                   VALUES (?, ?, ?, ?)""",
+                (guest_name.strip()[:100] or None, challenge, iso_utc(now_utc()), table["id"]),
             )
             submission_id = cursor.lastrowid
             for content, extension, original_name in validated:
@@ -419,7 +519,11 @@ def admin_logout() -> Response:
 
 @app.get("/admin", response_class=HTMLResponse)
 def admin_dashboard(
-    request: Request, prompt_error: str = "", prompts_saved: bool = False
+    request: Request,
+    prompt_error: str = "",
+    prompts_saved: bool = False,
+    table_error: str = "",
+    table_saved: bool = False,
 ) -> Response:
     if redirect := require_admin(request):
         return redirect
@@ -436,15 +540,39 @@ def admin_dashboard(
         category_prompts = list(dict.fromkeys([*prompts, *category_counts]))
         queue = db.execute(
             """SELECT photos.id, photos.filename, photos.original_name, photos.approval,
-                      submissions.guest_name, submissions.table_number, submissions.challenge, submissions.created_at
+                      submissions.guest_name, submissions.table_number, tables.name AS table_name,
+                      submissions.challenge, submissions.created_at
                FROM photos JOIN submissions ON submissions.id = photos.submission_id
+               LEFT JOIN tables ON tables.id = submissions.table_id
                ORDER BY CASE photos.approval WHEN 'pending' THEN 0 ELSE 1 END, photos.id DESC"""
         ).fetchall()
+        tables = db.execute(
+            """SELECT tables.id, tables.name, tables.token, tables.photo_limit,
+                      COUNT(photos.id) AS photo_count
+               FROM tables
+               LEFT JOIN submissions ON submissions.table_id = tables.id
+               LEFT JOIN photos ON photos.submission_id = submissions.id
+               GROUP BY tables.id
+               ORDER BY tables.id"""
+        ).fetchall()
     guest_url = PUBLIC_URL or str(request.url_for("home"))
-    qr = qrcode.make(guest_url)
-    qr_buffer = io.BytesIO()
-    qr.save(qr_buffer, format="PNG")
-    qr_data = "data:image/png;base64," + base64.b64encode(qr_buffer.getvalue()).decode("ascii")
+    table_qrs = []
+    for table in tables:
+        table_url = f"{guest_url.rstrip('/')}/table/{table['token']}"
+        qr_buffer = io.BytesIO()
+        qrcode.make(table_url).save(qr_buffer, format="PNG")
+        table_qrs.append(
+            {
+                "id": table["id"],
+                "name": table["name"],
+                "token": table["token"],
+                "photo_limit": table["photo_limit"],
+                "photo_count": table["photo_count"],
+                "url": table_url,
+                "qr_data": "data:image/png;base64,"
+                + base64.b64encode(qr_buffer.getvalue()).decode("ascii"),
+            }
+        )
     prompt_errors = {
         "empty": "Add at least one prompt before saving.",
         "too_many": "You can add up to 50 prompts.",
@@ -456,8 +584,14 @@ def admin_dashboard(
         countdown_hours=countdown_hours, total_submissions=total_submissions, total_photos=total_photos,
         pending_count=pending_count, category_counts=category_counts,
         category_prompts=category_prompts, queue=queue, prompts=prompts,
-        qr_data=qr_data, guest_url=guest_url, wheel_enabled=wheel_enabled,
+        guest_url=guest_url, tables=table_qrs, wheel_enabled=wheel_enabled,
         prompt_error=prompt_errors.get(prompt_error, ""), prompts_saved=prompts_saved,
+        table_error={
+            "invalid": "Enter a table name and a photo limit of at least 1.",
+            "duplicate": "A table with that name already exists.",
+            "missing": "That table could not be found.",
+        }.get(table_error, ""),
+        table_saved=table_saved,
     )
 
 
@@ -524,6 +658,87 @@ def update_state(request: Request, action: str = Form(...), countdown_hours: int
         elif action == "open":
             db.execute("UPDATE settings SET state = 'open', go_live_at = NULL WHERE id = 1")
     return RedirectResponse("/admin", status_code=303)
+
+
+@app.post("/admin/tables")
+def create_table(
+    request: Request, name: str = Form(...), photo_limit: int = Form(...)
+) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    name = name.strip()
+    if not name or len(name) > 80 or not 1 <= photo_limit <= 1_000_000:
+        return RedirectResponse("/admin?table_error=invalid#tables", status_code=303)
+    try:
+        with database() as db:
+            db.execute(
+                "INSERT INTO tables (name, token, photo_limit) VALUES (?, ?, ?)",
+                (name, secrets.token_urlsafe(24), photo_limit),
+            )
+    except sqlite3.IntegrityError:
+        return RedirectResponse("/admin?table_error=duplicate#tables", status_code=303)
+    return RedirectResponse("/admin?table_saved=true#tables", status_code=303)
+
+
+@app.post("/admin/tables/{table_id}")
+def update_table(
+    request: Request,
+    table_id: int,
+    name: str = Form(...),
+    photo_limit: int = Form(...),
+) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    name = name.strip()
+    if not name or len(name) > 80 or not 1 <= photo_limit <= 1_000_000:
+        return RedirectResponse("/admin?table_error=invalid#tables", status_code=303)
+    try:
+        with database() as db:
+            cursor = db.execute(
+                "UPDATE tables SET name = ?, photo_limit = ? WHERE id = ?",
+                (name, photo_limit, table_id),
+            )
+            if not cursor.rowcount:
+                return RedirectResponse("/admin?table_error=missing#tables", status_code=303)
+    except sqlite3.IntegrityError:
+        return RedirectResponse("/admin?table_error=duplicate#tables", status_code=303)
+    return RedirectResponse("/admin?table_saved=true#tables", status_code=303)
+
+
+@app.post("/admin/tables/{table_id}/rotate")
+def rotate_table_token(request: Request, table_id: int) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    with database() as db:
+        cursor = db.execute(
+            "UPDATE tables SET token = ? WHERE id = ?",
+            (secrets.token_urlsafe(24), table_id),
+        )
+        if not cursor.rowcount:
+            return RedirectResponse("/admin?table_error=missing#tables", status_code=303)
+    return RedirectResponse("/admin?table_saved=true#tables", status_code=303)
+
+
+@app.get("/admin/tables/{table_id}/qr.png")
+def download_table_qr(request: Request, table_id: int) -> Response:
+    if redirect := require_admin(request):
+        return redirect
+    with database() as db:
+        table = db.execute(
+            "SELECT token FROM tables WHERE id = ?", (table_id,)
+        ).fetchone()
+    if not table:
+        return Response(status_code=404)
+    guest_url = PUBLIC_URL or str(request.url_for("home"))
+    qr_buffer = io.BytesIO()
+    qrcode.make(
+        f"{guest_url.rstrip('/')}/table/{table['token']}"
+    ).save(qr_buffer, format="PNG")
+    return Response(
+        qr_buffer.getvalue(),
+        media_type="image/png",
+        headers={"Content-Disposition": f'attachment; filename="table-{table_id}-qr.png"'},
+    )
 
 
 @app.post("/admin/wheel")

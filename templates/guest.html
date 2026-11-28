@@ -41,11 +41,9 @@
     <section class="content-card upload-card">
       <div class="section-heading"><span class="step-number">01</span><div><p class="eyebrow">YOUR MOMENT</p><h2>Make it part of the story</h2></div></div>
       {% if error %}<div class="alert" role="alert">{{ error }}</div>{% endif %}
-      <form class="upload-form" action="/submit" method="post" enctype="multipart/form-data">
-        <div class="field-row">
-          <label class="field"><span>{{ text.name_label }} <em>optional</em></span><input type="text" name="guest_name" placeholder="What should we call you?" maxlength="100" autocomplete="name"></label>
-          <label class="field"><span>{{ text.table_label }} <em>optional</em></span><input type="text" name="table_number" placeholder="e.g. 4" maxlength="50"></label>
-        </div>
+      <p class="table-quota-note"><strong>{{ table_name }}</strong> · {{ table_remaining }} of {{ table_limit }} photos left for this table.</p>
+      <form class="upload-form" action="/table/{{ table_token }}/submit" method="post" enctype="multipart/form-data">
+        <label class="field"><span>{{ text.name_label }} <em>optional</em></span><input type="text" name="guest_name" placeholder="What should we call you?" maxlength="100" autocomplete="name"></label>
         <div class="field challenge-field">
           <span>{{ text.challenge_label }}</span>
           <div class="challenge-picker">
@@ -86,6 +84,22 @@
         <button class="button button-primary submit-button" type="submit">{{ text.submit_label }} <span aria-hidden="true">↗</span></button>
         <p class="privacy-note">Your photos will be reviewed before they appear in the gallery.</p>
       </form>
+    </section>
+
+    {% elif state == 'table_required' %}
+    <section class="state-card closed-card">
+      <div class="closed-illustration" aria-hidden="true"><span>✦</span><div class="camera-icon">◉</div><span>✳</span></div>
+      <p class="eyebrow">A LITTLE NOTE BEFORE YOU UPLOAD</p>
+      <h1>Find your table's QR code</h1>
+      <p class="state-copy">Each table has its own upload code so the couple can keep track of photo spots. Scan the code at your table to add your photos—there's no need to enter your table number.</p>
+    </section>
+
+    {% elif state == 'table_full' %}
+    <section class="state-card closed-card">
+      <div class="closed-illustration" aria-hidden="true"><span>✦</span><div class="camera-icon">◉</div><span>✳</span></div>
+      <p class="eyebrow">THANK YOU, {{ table_name }}</p>
+      <h1>You've filled the frame.</h1>
+      <p class="state-copy">This table has reached its limit of {{ table_limit }} photos. Thank you for sharing the moments that make the day.</p>
     </section>
 
     {% elif state == 'closed' %}
